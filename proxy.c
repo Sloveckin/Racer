@@ -13,14 +13,20 @@ struct request {
 	bool is_write;
 };
 
-struct request_list {
-	struct request_list *prev;
-	struct request_list *next;
+struct request_node {
+	struct request_node *prev;
+	struct request_node *next;
 	struct request data;
 };
 
 struct target_info {
 	struct dm_dev *dev;
+	struct request_node *list;
+	spinlock_t lock;
+};
+
+struct bio_context {
+	struct request_node *node;
 };
 
 static int proxy_ctr(struct dm_target *ti, unsigned int argc, char **argv)
@@ -41,6 +47,13 @@ static int proxy_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		goto bad;
 	}
 
+	target->list = kmalloc(sizeof(struct request_node), GFP_KERNEL);
+	if (target->list == NULL) {
+		ti->error = "Not enough memory for list";
+		error = -ENOMEM;
+		goto bad;
+	}
+
 	int err = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table), &target->dev);
 	if (err) {
 		ti->error = "Device lookup failed";
@@ -51,11 +64,17 @@ static int proxy_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	// Rememer target with information
 	ti->private = target;
 
+	// Init spinlock
+	spin_lock_init(&target->lock);
+
 	printk(KERN_INFO "Device %s successfully mapped\n", argv[0]);
 
 	return 0;
 
 bad:
+
+	if (target->list)
+		kfree(target->list);
 
 	if (target)
 		kfree(target);
@@ -63,10 +82,63 @@ bad:
 	return error;
 }
 
+// Optimization... becuase this function is called in loop :-)
+static inline bool intersection(struct request *req1, struct request *req2)
+{
+
+	if (req1->is_write == false && req2->is_write == false)	
+		return false;
+
+	return !(req1->end <= req2->begin || req2->end <= req1->begin);
+}
+
 static int proxy_map(struct dm_target *ti, struct bio *bio)
 {
 	struct target_info *target = ti->private;
+
+	sector_t begin = bio->bi_iter.bi_sector;
+	sector_t end = begin + bio_sectors(bio);
+
+	struct request req = {
+		.begin = begin,
+		.end = end,
+		.is_write = op_is_write(bio->bi_opf),
+	};
+
+	unsigned long flags;
+	spin_lock_irqsave(&target->lock, flags);
+
+	struct request_node *cur = target->list;
+	while (cur->next != NULL) {
+		if (intersection(&cur->data, &req)) {
+			printk(KERN_WARNING "Intersection!");
+		}
+		cur = cur->next;
+	}
+
+	struct request_node *new_node = kmalloc(sizeof(struct request_node), GFP_KERNEL);
+	if (new_node == NULL)
+	{
+		ti->error = "Not enough memory for struct request_node";
+		/// Не забываем снять лок
+		spin_unlock_irqrestore(&target->lock, flags);
+		return -DM_MAPIO_KILL;
+	}
 	
+	struct bio_context *ctx = kmalloc(sizeof(struct bio_context), GFP_KERNEL);
+	if (ctx == NULL) {
+		ti->error = "Not enough memory for struct bio_context";
+		//  Не забываем снять лок
+		spin_unlock_irqrestore(&target->lock, flags);
+		return -DM_MAPIO_KILL;
+	}
+
+	new_node->data = req;
+	cur->next = new_node;
+	bio->bi_private = ctx;
+
+	spin_unlock_irqrestore(&target->lock, flags);
+
 	bio_set_dev(bio, target->dev->bdev);
 
 	return DM_MAPIO_REMAPPED;
@@ -81,14 +153,33 @@ static void proxy_dtr(struct dm_target *ti)
 	kfree(target);
 }
 
+static void delete_node_from_list(struct target_info *target, struct request_node *node)
+{
+	unsigned long flags;
+	spin_lock_irqsave(&target->lock, flags);
+
+	struct request_node *prev = node->prev;
+	struct request_node *next = node->next;
+
+	if (prev != NULL)
+		prev->next = next;
+	
+	if (next != NULL)
+		next->prev = prev;
+
+	kfree(node);
+
+	spin_unlock_irqrestore(&target->lock, flags);
+}
+
 static int proxy_end_io(struct dm_target *ti,
                      struct bio *bio,
                      blk_status_t *error)
 {
-    pr_info("I/O done: sector=%llu status=%d op=%d\n",
-            (unsigned long long)bio->bi_iter.bi_sector,
-            *error,
-            bio_op(bio));
+	struct target_info *target = ti->private;
+    struct bio_context *ctx = bio->bi_private;
+
+	delete_node_from_list(target, ctx->node);
 
     return DM_ENDIO_DONE;
 }
