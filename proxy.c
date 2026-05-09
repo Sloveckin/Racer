@@ -6,6 +6,19 @@
 
 #define DM_MSG_PREFIX "proxy"
 
+
+struct request {
+	sector_t begin;
+	sector_t end;
+	bool is_write;
+};
+
+struct request_list {
+	struct request_list *prev;
+	struct request_list *next;
+	struct request data;
+};
+
 struct target_info {
 	struct dm_dev *dev;
 };
@@ -56,11 +69,6 @@ static int proxy_map(struct dm_target *ti, struct bio *bio)
 	
 	bio_set_dev(bio, target->dev->bdev);
 
-	sector_t start = bio->bi_iter.bi_sector;
-    sector_t end = start + bio_sectors(bio);
-
-    printk(KERN_INFO "BIO start=%llu end=%llu\n", start, end);
-
 	return DM_MAPIO_REMAPPED;
 }
 
@@ -73,6 +81,18 @@ static void proxy_dtr(struct dm_target *ti)
 	kfree(target);
 }
 
+static int proxy_end_io(struct dm_target *ti,
+                     struct bio *bio,
+                     blk_status_t *error)
+{
+    pr_info("I/O done: sector=%llu status=%d op=%d\n",
+            (unsigned long long)bio->bi_iter.bi_sector,
+            *error,
+            bio_op(bio));
+
+    return DM_ENDIO_DONE;
+}
+
 static struct target_type proxy_target = {
 	.name   = "proxy",
 	.version = {1, 0, 0},
@@ -81,6 +101,7 @@ static struct target_type proxy_target = {
 	.ctr    = proxy_ctr,
 	.dtr    = proxy_dtr,
 	.map    = proxy_map,
+	.end_io = proxy_end_io,
 };
 module_dm(proxy);
 
