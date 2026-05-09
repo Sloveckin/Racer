@@ -1,30 +1,39 @@
-/// SPDX-License-Identifier: GPL-2.0-only
-/*
- * Copyright (C) 2003 Jana Saout <jana@saout.de>
- *
- * This file is released under the GPL.
- */
-
 #include <linux/device-mapper.h>
 
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/bio.h>
 
-#define DM_MSG_PREFIX "zero"
+#define DM_MSG_PREFIX "proxy"
 
-/*
- * Construct a dummy mapping that only returns zeros
- */
+struct target_info {
+	struct dm_dev *dev;
+};
+
 static int ctr(struct dm_target *ti, unsigned int argc, char **argv)
 {
+	struct target_info *target;
+	int error = 0;
+
 	if (argc != 1) {
-		ti->error = "No arguments required";
-		return -EINVAL;
+		ti->error = "Invalid amount of arguments";
+		error = -EINVAL;
+		goto end;
 	}
 
+	target = kmalloc(sizeof(struct target_info*), GFP_DMA);
+	if (target == NULL) {
+		error = -ENOMEM;
+		goto end;
+	}
+
+	// Rememer target with information
+	ti->private = target;
+
 	printk(KERN_INFO "Device %s successfully mapped\n", argv[0]);
-	return 0;
+
+end:
+	return error;
 }
 
 /*
