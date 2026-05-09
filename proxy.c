@@ -53,6 +53,8 @@ static int proxy_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		error = -ENOMEM;
 		goto bad;
 	}
+	target->list->next = NULL;
+	target->list->prev = NULL;
 
 	int err = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table), &target->dev);
 	if (err) {
@@ -117,13 +119,16 @@ static int proxy_map(struct dm_target *ti, struct bio *bio)
 	}
 
 	struct request_node *new_node = kmalloc(sizeof(struct request_node), GFP_KERNEL);
-	if (new_node == NULL)
+	if (new_node == NULL)ё
 	{
 		ti->error = "Not enough memory for struct request_node";
 		/// Не забываем снять лок
 		spin_unlock_irqrestore(&target->lock, flags);
 		return -DM_MAPIO_KILL;
 	}
+	new_node->data = NULL;
+	new_node->prev = NULL;
+	new_node->next = NULL;
 	
 	struct bio_context *ctx = kmalloc(sizeof(struct bio_context), GFP_KERNEL);
 	if (ctx == NULL) {
@@ -136,6 +141,8 @@ static int proxy_map(struct dm_target *ti, struct bio *bio)
 	new_node->data = req;
 	cur->next = new_node;
 	bio->bi_private = ctx;
+
+	ctx->node = new_node;
 
 	spin_unlock_irqrestore(&target->lock, flags);
 
