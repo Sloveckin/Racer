@@ -10,21 +10,29 @@ struct target_info {
 	struct dm_dev *dev;
 };
 
-static int ctr(struct dm_target *ti, unsigned int argc, char **argv)
+static int proxy_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 {
-	struct target_info *target;
+	struct target_info *target = NULL;
 	int error = 0;
 
 	if (argc != 1) {
 		ti->error = "Invalid amount of arguments";
 		error = -EINVAL;
-		goto end;
+		goto bad;
 	}
 
-	target = kmalloc(sizeof(struct target_info*), GFP_DMA);
+	target = kmalloc(sizeof(struct target_info), GFP_KERNEL);
 	if (target == NULL) {
+		ti->error = "Not enough memory for target_info";
 		error = -ENOMEM;
-		goto end;
+		goto bad;
+	}
+
+	int err = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table), &target->dev);
+	if (err) {
+		ti->error = "Device lookup failed";
+		error = -EINVAL;
+		goto bad;
 	}
 
 	// Rememer target with information
@@ -32,48 +40,50 @@ static int ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	printk(KERN_INFO "Device %s successfully mapped\n", argv[0]);
 
-end:
+	return 0;
+
+bad:
+
+	if (target)
+		kfree(target);
+
 	return error;
 }
 
-/*
- * Return zeros only on reads
- */
-static int map(struct dm_target *ti, struct bio *bio)
+static int proxy_map(struct dm_target *ti, struct bio *bio)
 {
-	/*switch (bio_op(bio)) {
-	case REQ_OP_READ:
-		if (bio->bi_opf & REQ_RAHEAD) {
-			// readahead of null bytes only wastes buffer cache
-			return DM_MAPIO_KILL;
-		}
-		zero_fill_bio(bio);
-		break;
-	case REQ_OP_WRITE:
-	case REQ_OP_DISCARD:
-		///* writes get silently dropped 
-		break;
-	default:
-		return DM_MAPIO_KILL;
-	}*/
+	struct target_info *target = ti->private;
 	
+	bio_set_dev(bio, target->dev->bdev);
 
-	bio_endio(bio);
+	sector_t start = bio->bi_iter.bi_sector;
+    sector_t end = start + bio_sectors(bio);
 
-	/* accepted bio, don't make new request */
-	return DM_MAPIO_SUBMITTED;
+    printk(KERN_INFO "BIO start=%llu end=%llu\n", start, end);
+
+	return DM_MAPIO_REMAPPED;
 }
 
-static struct target_type zero_target = {
+static void proxy_dtr(struct dm_target *ti) 
+{
+	struct target_info *target = ti->private;
+	
+	printk(KERN_INFO "Device successfully unmapped\n");
+	dm_put_device(ti, target->dev);
+	kfree(target);
+}
+
+static struct target_type proxy_target = {
 	.name   = "proxy",
-	.version = {1, 2, 0},
+	.version = {1, 0, 0},
 	.features = DM_TARGET_NOWAIT,
 	.module = THIS_MODULE,
-	.ctr    = ctr,
-	.map    = map,
+	.ctr    = proxy_ctr,
+	.dtr    = proxy_dtr,
+	.map    = proxy_map,
 };
-module_dm(zero);
+module_dm(proxy);
 
-MODULE_AUTHOR("Jana Saout <jana@saout.de>");
-MODULE_DESCRIPTION(DM_NAME " dummy target returning zeros");
+MODULE_AUTHOR("Slava Rybin");
+MODULE_DESCRIPTION(DM_NAME " proxy target that checks data racing");
 MODULE_LICENSE("GPL");
