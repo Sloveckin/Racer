@@ -73,7 +73,6 @@ bad:
 // Optimization... because this function is called in loop :-)
 static inline bool intersection(struct request *req1, struct request *req2)
 {
-
 	if (req1->is_write == false && req2->is_write == false)	
 		return false;
 
@@ -92,15 +91,21 @@ static int proxy_map(struct dm_target *ti, struct bio *bio)
 		ti->error = "Not enough memory";
 		return DM_MAPIO_KILL;
 	}
+	
 	req->begin = begin;
 	req->end = end;
 	req->is_write = op_is_write(bio->bi_opf);
 
+	INIT_LIST_HEAD(&req->list);
+
 	struct bio_context *ctx = kmalloc(sizeof(struct bio_context), GFP_KERNEL);
 	if (ctx == NULL) {
 		ti->error = "Not enough memory for struct bio_context";
+		kfree(req);
 		return DM_MAPIO_KILL;
 	}
+
+	
 
 	unsigned long flags;
 	spin_lock_irqsave(&target->lock, flags);
@@ -119,6 +124,8 @@ static int proxy_map(struct dm_target *ti, struct bio *bio)
 	spin_unlock_irqrestore(&target->lock, flags);
 
 	bio_set_dev(bio, target->dev->bdev);
+
+	printk(KERN_WARNING "HERE\n");
 
 	return DM_MAPIO_REMAPPED;
 }
