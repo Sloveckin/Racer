@@ -98,15 +98,6 @@ static int proxy_map(struct dm_target *ti, struct bio *bio)
 
 	INIT_LIST_HEAD(&req->list);
 
-	struct bio_context *ctx = kmalloc(sizeof(struct bio_context), GFP_KERNEL);
-	if (ctx == NULL) {
-		ti->error = "Not enough memory for struct bio_context";
-		kfree(req);
-		return DM_MAPIO_KILL;
-	}
-
-	
-
 	unsigned long flags;
 	spin_lock_irqsave(&target->lock, flags);
 
@@ -117,15 +108,16 @@ static int proxy_map(struct dm_target *ti, struct bio *bio)
 		}
 	}
 
+	ti->per_io_data_size = sizeof(struct bio_context);
+	struct bio_context *ctx = dm_per_bio_data(bio, ti->per_io_data_size);
+	ctx->node = req;
+
 	list_add(&req->list, &target->list);
-	bio->bi_private = ctx;
 	ctx->node = req;
 
 	spin_unlock_irqrestore(&target->lock, flags);
 
 	bio_set_dev(bio, target->dev->bdev);
-
-	printk(KERN_WARNING "HERE\n");
 
 	return DM_MAPIO_REMAPPED;
 }
@@ -144,18 +136,16 @@ static int proxy_end_io(struct dm_target *ti,
                      blk_status_t *error)
 {
 	struct target_info *target = ti->private;
-    struct bio_context *ctx = bio->bi_private;
-	
+	struct bio_context *ctx = dm_per_bio_data(bio, ti->per_io_data_size);
+
 	unsigned long flags;
 	spin_lock_irqsave(&target->lock, flags);
-
 
 	list_del(&ctx->node->list);
 
 	spin_unlock_irqrestore(&target->lock, flags);
 
 	kfree(ctx->node);
-	kfree(ctx);
 
     return DM_ENDIO_DONE;
 }
