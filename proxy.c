@@ -11,22 +11,18 @@ struct request {
 	sector_t begin;
 	sector_t end;
 	bool is_write;
-};
 
-struct request_node {
-	struct request_node *prev;
-	struct request_node *next;
-	struct request data;
+	struct list_head list;
 };
 
 struct target_info {
 	struct dm_dev *dev;
-	struct request_node *list;
+	struct list_head list;
 	spinlock_t lock;
 };
 
 struct bio_context {
-	struct request_node *node;
+	struct request *node;
 };
 
 static int proxy_ctr(struct dm_target *ti, unsigned int argc, char **argv)
@@ -47,14 +43,7 @@ static int proxy_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		goto bad;
 	}
 
-	target->list = kmalloc(sizeof(struct request_node), GFP_KERNEL);
-	if (target->list == NULL) {
-		ti->error = "Not enough memory for list";
-		error = -ENOMEM;
-		goto bad;
-	}
-	target->list->next = NULL;
-	target->list->prev = NULL;
+	INIT_LIST_HEAD(&target->list);
 
 	int err = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table), &target->dev);
 	if (err) {
@@ -75,16 +64,13 @@ static int proxy_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 bad:
 
-	if (target->list)
-		kfree(target->list);
-
 	if (target)
 		kfree(target);
 
 	return error;
 }
 
-// Optimization... becuase this function is called in loop :-)
+// Optimization... because this function is called in loop :-)
 static inline bool intersection(struct request *req1, struct request *req2)
 {
 
@@ -101,48 +87,34 @@ static int proxy_map(struct dm_target *ti, struct bio *bio)
 	sector_t begin = bio->bi_iter.bi_sector;
 	sector_t end = begin + bio_sectors(bio);
 
-	struct request req = {
-		.begin = begin,
-		.end = end,
-		.is_write = op_is_write(bio->bi_opf),
-	};
+	struct request *req = kmalloc(sizeof(struct request), GFP_KERNEL);
+	if (req == NULL) {
+		ti->error = "Not enough memory";
+		return DM_MAPIO_KILL;
+	}
+	req->begin = begin;
+	req->end = end;
+	req->is_write = op_is_write(bio->bi_opf);
+
+	struct bio_context *ctx = kmalloc(sizeof(struct bio_context), GFP_KERNEL);
+	if (ctx == NULL) {
+		ti->error = "Not enough memory for struct bio_context";
+		return DM_MAPIO_KILL;
+	}
 
 	unsigned long flags;
 	spin_lock_irqsave(&target->lock, flags);
 
-	struct request_node *cur = target->list;
-	while (cur->next != NULL) {
-		if (intersection(&cur->data, &req)) {
-			printk(KERN_WARNING "Intersection!");
+	struct request *cur;
+	list_for_each_entry(cur, &target->list, list) {
+		if (intersection(cur, req)) {
+			printk(KERN_WARNING "Data racing");
 		}
-		cur = cur->next;
 	}
 
-	struct request_node *new_node = kmalloc(sizeof(struct request_node), GFP_KERNEL);
-	if (new_node == NULL)ё
-	{
-		ti->error = "Not enough memory for struct request_node";
-		/// Не забываем снять лок
-		spin_unlock_irqrestore(&target->lock, flags);
-		return -DM_MAPIO_KILL;
-	}
-	new_node->data = NULL;
-	new_node->prev = NULL;
-	new_node->next = NULL;
-	
-	struct bio_context *ctx = kmalloc(sizeof(struct bio_context), GFP_KERNEL);
-	if (ctx == NULL) {
-		ti->error = "Not enough memory for struct bio_context";
-		//  Не забываем снять лок
-		spin_unlock_irqrestore(&target->lock, flags);
-		return -DM_MAPIO_KILL;
-	}
-
-	new_node->data = req;
-	cur->next = new_node;
+	list_add(&req->list, &target->list);
 	bio->bi_private = ctx;
-
-	ctx->node = new_node;
+	ctx->node = req;
 
 	spin_unlock_irqrestore(&target->lock, flags);
 
@@ -160,33 +132,23 @@ static void proxy_dtr(struct dm_target *ti)
 	kfree(target);
 }
 
-static void delete_node_from_list(struct target_info *target, struct request_node *node)
-{
-	unsigned long flags;
-	spin_lock_irqsave(&target->lock, flags);
-
-	struct request_node *prev = node->prev;
-	struct request_node *next = node->next;
-
-	if (prev != NULL)
-		prev->next = next;
-	
-	if (next != NULL)
-		next->prev = prev;
-
-	kfree(node);
-
-	spin_unlock_irqrestore(&target->lock, flags);
-}
-
 static int proxy_end_io(struct dm_target *ti,
                      struct bio *bio,
                      blk_status_t *error)
 {
 	struct target_info *target = ti->private;
     struct bio_context *ctx = bio->bi_private;
+	
+	unsigned long flags;
+	spin_lock_irqsave(&target->lock, flags);
 
-	delete_node_from_list(target, ctx->node);
+
+	list_del(&ctx->node->list);
+
+	spin_unlock_irqrestore(&target->lock, flags);
+
+	kfree(ctx->node);
+	kfree(ctx);
 
     return DM_ENDIO_DONE;
 }
