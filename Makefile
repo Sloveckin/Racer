@@ -1,9 +1,6 @@
-# Name of the module to build
-obj-m += proxy.o
+obj-m += dm_monitor.o
 
-# Path to the kernel build directory
 KDIR := /lib/modules/$(shell uname -r)/build
-# Current working directory
 PWD := $(shell pwd)
 
 all:

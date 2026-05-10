@@ -1,1 +1,0 @@
-sudo dmsetup remove my0
